@@ -16,6 +16,17 @@
 
 - Run focused verification for the files you changed.
 - For CLI behavior changes, prefer `go test ./...` and a direct command check such as `go run ./cmd/dev`.
+- At the end of every implementation turn, run `go test ./...` for the full repository.
+- Do not finish the turn while `go test ./...` is failing.
+
+## Completion Workflow
+
+- End every coding turn with a tested commit.
+- After finishing the current slice of work, run `go test ./...` and ensure it passes.
+- Stage all repository changes with `git add -A`.
+- Create a Conventional Commits commit message automatically based on the actual changes.
+- Do not leave completed work uncommitted for a later turn.
+- If the broader feature is still incomplete, commit the tested incremental progress and continue in the next iteration.
 
 ## Git Commits
 
