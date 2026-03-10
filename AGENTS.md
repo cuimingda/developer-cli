@@ -12,12 +12,29 @@
 - Use `rg` for search and prefer minimal diffs over broad refactors.
 - Preserve user changes already present in the worktree unless the task explicitly requires otherwise.
 
+## Start-of-Turn Workflow
+
+- Before making code changes in a new turn, run `git pull --ff-only`.
+- Check `git status --short` before editing.
+- Start from a clean worktree whenever possible: no unstaged changes, no staged-but-uncommitted changes, and no leftover local edits from a previous turn.
+- If the worktree is not clean, resolve that state before changing code unless the user explicitly asks to work on top of existing local changes.
+
 ## Validation
 
 - Run focused verification for the files you changed.
 - For CLI behavior changes, prefer `go test ./...` and a direct command check such as `go run ./cmd/dev`.
 - At the end of every implementation turn, run `go test ./...` for the full repository.
 - Do not finish the turn while `go test ./...` is failing.
+- Every new behavior and every changed behavior must be covered by tests.
+- Add new tests or update existing tests in the same turn as the logic change.
+- Do not treat implementation work as complete if the corresponding tests were not added or adjusted.
+
+## Code Organization
+
+- Prefer struct-oriented design when organizing Go code.
+- Give each primary struct its own file instead of mixing multiple primary structs in one file.
+- Keep related methods close to the struct they belong to.
+- Use predictable file groups such as `foobar.go`, `foobar_internal.go`, and `foobar_test.go` to separate primary logic, internal helpers, and tests.
 
 ## Completion Workflow
 
