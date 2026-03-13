@@ -14,6 +14,7 @@ import (
 
 const (
 	githubCurrentUserPath                  = "/user"
+	githubUserInstallationsPath            = "/user/installations"
 	githubRESTAcceptHeader                 = "application/vnd.github+json"
 	githubAccessTokenExpiringSoonThreshold = 15 * time.Minute
 )
@@ -48,6 +49,14 @@ const (
 	GitHubRemoteProbeFailed       GitHubRemoteProbeState = "failed"
 )
 
+type GitHubAppInstallationState string
+
+const (
+	GitHubAppInstallationUnknown      GitHubAppInstallationState = "unknown"
+	GitHubAppInstallationInstalled    GitHubAppInstallationState = "installed"
+	GitHubAppInstallationNotInstalled GitHubAppInstallationState = "not_installed"
+)
+
 type GitHubAuthStatusRunner struct {
 	initializer           *ConfigInitializer
 	httpClient            *http.Client
@@ -75,6 +84,10 @@ type GitHubAuthStatusReport struct {
 	RemoteProbeStatusCode int
 	RemoteProbeStatus     string
 	RemoteProbeMessage    string
+	AppInstallationState  GitHubAppInstallationState
+	AppInstallationCount  int
+	AppInstallationOwners []string
+	AppInstallationReason string
 }
 
 type gitHubCurrentUserResponse struct {
@@ -83,6 +96,26 @@ type gitHubCurrentUserResponse struct {
 
 type gitHubAPIErrorResponse struct {
 	Message string `json:"message"`
+}
+
+type gitHubUserInstallationsResponse struct {
+	TotalCount    int                      `json:"total_count"`
+	Installations []gitHubUserInstallation `json:"installations"`
+}
+
+type gitHubUserInstallation struct {
+	Account    gitHubInstallationAccount `json:"account"`
+	TargetType string                    `json:"target_type"`
+}
+
+type gitHubInstallationAccount struct {
+	Login string `json:"login"`
+}
+
+type gitHubAppInstallationProbe struct {
+	State  GitHubAppInstallationState
+	Count  int
+	Owners []string
 }
 
 func newGitHubAuthStatusRunner(initializer *ConfigInitializer) *GitHubAuthStatusRunner {
@@ -138,12 +171,16 @@ func (r *GitHubAuthStatusRunner) Evaluate(ctx context.Context) (GitHubAuthStatus
 		report.NextAction = nextActionWithoutAccessToken(report.ClientIDPresent)
 		report.RemoteProbeState = GitHubRemoteProbeSkipped
 		report.RemoteProbeMessage = "skipped because no access token is stored locally"
+		report.AppInstallationState = GitHubAppInstallationUnknown
+		report.AppInstallationReason = "skipped because no access token is stored locally"
 		return report, nil
 	}
 
 	if report.AccessTokenExpired {
 		report.RemoteProbeState = GitHubRemoteProbeSkipped
 		report.RemoteProbeMessage = "skipped because the access token is already expired"
+		report.AppInstallationState = GitHubAppInstallationUnknown
+		report.AppInstallationReason = "skipped because the access token is already expired"
 		if report.RefreshTokenPresent && !report.RefreshTokenExpired {
 			report.State = GitHubAuthStateAccessTokenExpiredRefreshable
 			report.Summary = "Logged in, but the access token has expired and can be refreshed."
@@ -168,6 +205,8 @@ func (r *GitHubAuthStatusRunner) Evaluate(ctx context.Context) (GitHubAuthStatus
 		report.NextAction = GitHubAuthNextActionRetry
 		report.RemoteProbeState = GitHubRemoteProbeFailed
 		report.RemoteProbeMessage = err.Error()
+		report.AppInstallationState = GitHubAppInstallationUnknown
+		report.AppInstallationReason = "skipped because token validity could not be confirmed"
 		return report, nil
 	}
 
@@ -186,14 +225,27 @@ func (r *GitHubAuthStatusRunner) Evaluate(ctx context.Context) (GitHubAuthStatus
 			report.Summary = "Logged in, token is valid."
 		}
 		report.NextAction = GitHubAuthNextActionCallAPI
+		installationProbe, err := r.probeAppInstallations(ctx, report.APIBaseURL, report.Host)
+		if err != nil {
+			report.AppInstallationState = GitHubAppInstallationUnknown
+			report.AppInstallationReason = err.Error()
+			return report, nil
+		}
+		report.AppInstallationState = installationProbe.State
+		report.AppInstallationCount = installationProbe.Count
+		report.AppInstallationOwners = installationProbe.Owners
 	case GitHubRemoteProbeUnauthorized:
 		report.State = GitHubAuthStateAuthorizationInvalid
 		report.Summary = "Logged in, but authorization is no longer valid."
 		report.NextAction = nextActionWithoutRefreshToken(report.ClientIDPresent)
+		report.AppInstallationState = GitHubAppInstallationUnknown
+		report.AppInstallationReason = "skipped because authorization is no longer valid"
 	default:
 		report.State = GitHubAuthStateIndeterminate
 		report.Summary = "Logged in locally, but the remote probe could not confirm token validity."
 		report.NextAction = GitHubAuthNextActionRetry
+		report.AppInstallationState = GitHubAppInstallationUnknown
+		report.AppInstallationReason = "skipped because token validity could not be confirmed"
 	}
 
 	return report, nil
@@ -329,6 +381,71 @@ func (r *GitHubAuthStatusRunner) probeCurrentUser(
 	return probe, nil
 }
 
+func (r *GitHubAuthStatusRunner) probeAppInstallations(
+	ctx context.Context,
+	apiBaseURL string,
+	account string,
+) (gitHubAppInstallationProbe, error) {
+	token, err := r.tokenStore.Load(account)
+	if err != nil {
+		return gitHubAppInstallationProbe{}, err
+	}
+
+	endpoint, err := githubAPIEndpoint(apiBaseURL, githubUserInstallationsPath)
+	if err != nil {
+		return gitHubAppInstallationProbe{}, err
+	}
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return gitHubAppInstallationProbe{}, fmt.Errorf("build app installation request: %w", err)
+	}
+
+	request.Header.Set("Accept", githubRESTAcceptHeader)
+	request.Header.Set("Authorization", "Bearer "+token.AccessToken)
+
+	response, err := r.httpClient.Do(request)
+	if err != nil {
+		return gitHubAppInstallationProbe{}, fmt.Errorf("send app installation request: %w", err)
+	}
+	defer response.Body.Close()
+
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return gitHubAppInstallationProbe{}, fmt.Errorf("read app installation response: %w", err)
+	}
+
+	if response.StatusCode != http.StatusOK {
+		message := response.Status
+		if apiMessage := decodeGitHubAPIErrorMessage(body); apiMessage != "" {
+			message = response.Status + ": " + apiMessage
+		}
+
+		return gitHubAppInstallationProbe{}, fmt.Errorf("check app installation status: %s", message)
+	}
+
+	var installationsResponse gitHubUserInstallationsResponse
+	if err := json.Unmarshal(body, &installationsResponse); err != nil {
+		return gitHubAppInstallationProbe{}, fmt.Errorf("decode app installation response: %w", err)
+	}
+
+	count := installationsResponse.TotalCount
+	if count == 0 {
+		count = len(installationsResponse.Installations)
+	}
+	if count == 0 {
+		return gitHubAppInstallationProbe{
+			State: GitHubAppInstallationNotInstalled,
+		}, nil
+	}
+
+	return gitHubAppInstallationProbe{
+		State:  GitHubAppInstallationInstalled,
+		Count:  count,
+		Owners: summarizeInstallationOwners(installationsResponse.Installations),
+	}, nil
+}
+
 func writeGitHubAuthStatusReport(writer io.Writer, report GitHubAuthStatusReport, now time.Time) error {
 	lines := []string{
 		fmt.Sprintf("Status: %s", report.Summary),
@@ -353,6 +470,7 @@ func writeGitHubAuthStatusReport(writer io.Writer, report GitHubAuthStatusReport
 		"",
 		"Remote check:",
 		fmt.Sprintf("- GET /user: %s", remoteProbeDescription(report)),
+		fmt.Sprintf("- GitHub App installed: %s", appInstallationDescription(report)),
 	)
 
 	for _, line := range lines {
@@ -561,4 +679,64 @@ func remoteProbeDescription(report GitHubAuthStatusReport) string {
 		}
 		return "unavailable"
 	}
+}
+
+func appInstallationDescription(report GitHubAuthStatusReport) string {
+	switch report.AppInstallationState {
+	case GitHubAppInstallationInstalled:
+		if len(report.AppInstallationOwners) == 0 {
+			return fmt.Sprintf("yes (%d accessible installation%s)", report.AppInstallationCount, pluralSuffix(report.AppInstallationCount))
+		}
+
+		return fmt.Sprintf(
+			"yes (%d accessible installation%s: %s)",
+			report.AppInstallationCount,
+			pluralSuffix(report.AppInstallationCount),
+			strings.Join(report.AppInstallationOwners, ", "),
+		)
+	case GitHubAppInstallationNotInstalled:
+		return "no"
+	default:
+		reason := strings.TrimSpace(report.AppInstallationReason)
+		if reason == "" {
+			return "unknown"
+		}
+
+		return fmt.Sprintf("unknown (%s)", reason)
+	}
+}
+
+func summarizeInstallationOwners(installations []gitHubUserInstallation) []string {
+	if len(installations) == 0 {
+		return nil
+	}
+
+	owners := make([]string, 0, len(installations))
+	for _, installation := range installations {
+		owner := strings.TrimSpace(installation.Account.Login)
+		targetType := strings.TrimSpace(installation.TargetType)
+
+		switch {
+		case owner != "" && targetType != "":
+			owners = append(owners, fmt.Sprintf("%s (%s)", owner, targetType))
+		case owner != "":
+			owners = append(owners, owner)
+		case targetType != "":
+			owners = append(owners, targetType)
+		}
+	}
+
+	if len(owners) <= 3 {
+		return owners
+	}
+
+	return append(owners[:3], fmt.Sprintf("+%d more", len(owners)-3))
+}
+
+func pluralSuffix(count int) string {
+	if count == 1 {
+		return ""
+	}
+
+	return "s"
 }

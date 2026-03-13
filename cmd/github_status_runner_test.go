@@ -61,6 +61,9 @@ func TestGitHubAuthStatusRunnerRunReportsNotLoggedInWhenTokenIsMissing(t *testin
 	if !strings.Contains(reportOutput, "- GET /user: skipped because no access token is stored locally") {
 		t.Fatalf("output = %q, want skipped remote probe", reportOutput)
 	}
+	if !strings.Contains(reportOutput, "- GitHub App installed: unknown (skipped because no access token is stored locally)") {
+		t.Fatalf("output = %q, want skipped app installation probe", reportOutput)
+	}
 }
 
 func TestGitHubAuthStatusRunnerEvaluateReturnsValidStateWhenRemoteProbeSucceeds(t *testing.T) {
@@ -72,14 +75,18 @@ func TestGitHubAuthStatusRunnerEvaluateReturnsValidStateWhenRemoteProbeSucceeds(
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v3/user" {
-			t.Fatalf("unexpected request path: %s", r.URL.Path)
-		}
 		if got := r.Header.Get("Authorization"); got != "Bearer access-token" {
 			t.Fatalf("Authorization header = %q, want %q", got, "Bearer access-token")
 		}
 
-		writeGitHubJSONResponse(t, w, `{"login":"octocat"}`)
+		switch r.URL.Path {
+		case "/api/v3/user":
+			writeGitHubJSONResponse(t, w, `{"login":"octocat"}`)
+		case "/api/v3/user/installations":
+			writeGitHubJSONResponse(t, w, `{"total_count":1,"installations":[{"target_type":"Organization","account":{"login":"acme"}}]}`)
+		default:
+			t.Fatalf("unexpected request path: %s", r.URL.Path)
+		}
 	}))
 	defer server.Close()
 
@@ -121,6 +128,12 @@ func TestGitHubAuthStatusRunnerEvaluateReturnsValidStateWhenRemoteProbeSucceeds(
 	}
 	if report.RemoteProbeStatusCode != http.StatusOK {
 		t.Fatalf("report.RemoteProbeStatusCode = %d, want %d", report.RemoteProbeStatusCode, http.StatusOK)
+	}
+	if report.AppInstallationState != GitHubAppInstallationInstalled {
+		t.Fatalf("report.AppInstallationState = %q, want %q", report.AppInstallationState, GitHubAppInstallationInstalled)
+	}
+	if report.AppInstallationCount != 1 {
+		t.Fatalf("report.AppInstallationCount = %d, want %d", report.AppInstallationCount, 1)
 	}
 }
 
@@ -291,7 +304,14 @@ func TestGitHubAuthStatusRunnerRunDisplaysTokenTimesInLocalTimezone(t *testing.T
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeGitHubJSONResponse(t, w, `{"login":"octocat"}`)
+		switch r.URL.Path {
+		case "/api/v3/user":
+			writeGitHubJSONResponse(t, w, `{"login":"octocat"}`)
+		case "/api/v3/user/installations":
+			writeGitHubJSONResponse(t, w, `{"total_count":0,"installations":[]}`)
+		default:
+			t.Fatalf("unexpected request path: %s", r.URL.Path)
+		}
 	}))
 	defer server.Close()
 
@@ -328,6 +348,61 @@ func TestGitHubAuthStatusRunnerRunDisplaysTokenTimesInLocalTimezone(t *testing.T
 	}
 	if !strings.Contains(reportOutput, "valid until 2026-03-14T20:00:00+08:00 (Asia/Shanghai) (in 24h0m0s)") {
 		t.Fatalf("output = %q, want refresh token time in local timezone", reportOutput)
+	}
+	if !strings.Contains(reportOutput, "- GitHub App installed: no") {
+		t.Fatalf("output = %q, want app installation status", reportOutput)
+	}
+}
+
+func TestGitHubAuthStatusRunnerRunReportsInstalledGitHubApp(t *testing.T) {
+	useTestLocalTimezone(t)
+
+	initializer := newGitHubLoginTestInitializer(t)
+	if err := initializer.SetValue("github.client_id", "client-123"); err != nil {
+		t.Fatalf("SetValue() returned error: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v3/user":
+			writeGitHubJSONResponse(t, w, `{"login":"octocat"}`)
+		case "/api/v3/user/installations":
+			writeGitHubJSONResponse(t, w, `{"total_count":2,"installations":[{"target_type":"User","account":{"login":"octocat"}},{"target_type":"Organization","account":{"login":"acme"}}]}`)
+		default:
+			t.Fatalf("unexpected request path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	if err := initializer.SetValue("github.api_base_url", server.URL+"/api/v3"); err != nil {
+		t.Fatalf("SetValue() returned error: %v", err)
+	}
+
+	now := time.Date(2026, time.March, 13, 12, 0, 0, 0, time.UTC)
+	runner := &GitHubAuthStatusRunner{
+		initializer: initializer,
+		httpClient:  server.Client(),
+		now: func() time.Time {
+			return now
+		},
+		tokenStore: &stubGitHubTokenStore{
+			loadToken: GitHubStoredToken{
+				AccessToken:           "access-token",
+				RefreshToken:          "refresh-token",
+				AccessTokenExpiresAt:  timePointer(now.Add(2 * time.Hour)),
+				RefreshTokenExpiresAt: timePointer(now.Add(24 * time.Hour)),
+			},
+		},
+		expiringSoonThreshold: githubAccessTokenExpiringSoonThreshold,
+	}
+
+	var output bytes.Buffer
+	if err := runner.Run(context.Background(), &output); err != nil {
+		t.Fatalf("Run() returned error: %v", err)
+	}
+
+	if !strings.Contains(output.String(), "- GitHub App installed: yes (2 accessible installations: octocat (User), acme (Organization))") {
+		t.Fatalf("output = %q, want installed app status", output.String())
 	}
 }
 
