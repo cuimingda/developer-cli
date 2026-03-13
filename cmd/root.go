@@ -15,6 +15,10 @@ var currentGOOS = func() string {
 }
 
 func newRootCmd() *cobra.Command {
+	return newRootCmdWithConfigInitializer(newDefaultConfigInitializer())
+}
+
+func newRootCmdWithConfigInitializer(initializer *ConfigInitializer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "dev",
 		Short: "A brief description of your application",
@@ -30,6 +34,7 @@ to quickly create a Cobra application.`,
 	}
 
 	cmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+	cmd.AddCommand(newConfigCmd(initializer))
 
 	return cmd
 }
