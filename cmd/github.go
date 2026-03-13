@@ -20,6 +20,7 @@ func newGitHubCmd(initializer *ConfigInitializer, runner *GitHubLoginRunner) *co
 	}
 
 	cmd.AddCommand(newGitHubLoginCmd(runner))
+	cmd.AddCommand(newGitHubLogoutCmd(newGitHubLogoutRunner(initializer)))
 	cmd.AddCommand(newGitHubRefreshCmd(newGitHubRefreshRunner(initializer)))
 	cmd.AddCommand(newGitHubStatusCmd(newGitHubAuthStatusRunner(initializer)))
 

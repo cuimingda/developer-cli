@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,21 @@ import (
 )
 
 const githubRefreshLeeway = 5 * time.Minute
+
+type GitHubLogoutOptions struct {
+	RevokeRemote bool
+}
+
+type GitHubLogoutResult struct {
+	Account                string
+	LocalTokenFound        bool
+	LocalStateCleared      bool
+	RemoteRevokeRequested  bool
+	RemoteRevokeAttempted  bool
+	RemoteRevokeSucceeded  bool
+	RemoteRevokeSkipped    bool
+	RemoteRevokeSkipReason string
+}
 
 type GitHubAuthService struct {
 	initializer   *ConfigInitializer
@@ -94,6 +110,96 @@ func (s *GitHubAuthService) EnsureValidToken(ctx context.Context) (string, error
 	}
 
 	return refreshedToken.AccessToken, nil
+}
+
+func (s *GitHubAuthService) Logout(ctx context.Context, options GitHubLogoutOptions) (GitHubLogoutResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := s.ensureDefaults(); err != nil {
+		return GitHubLogoutResult{}, err
+	}
+
+	baseConfig, err := loadGitHubAuthBaseConfig(s.initializer)
+	if err != nil {
+		return GitHubLogoutResult{}, err
+	}
+
+	result := GitHubLogoutResult{
+		Account:               baseConfig.Account,
+		RemoteRevokeRequested: options.RevokeRemote,
+	}
+
+	storedToken, loadErr := s.tokenStore.Load(baseConfig.Account)
+	switch {
+	case errors.Is(loadErr, ErrGitHubTokenNotFound):
+	case errors.Is(loadErr, ErrGitHubStoredTokenInvalid):
+		result.RemoteRevokeSkipped = options.RevokeRemote
+		result.RemoteRevokeSkipReason = "local GitHub token state is invalid"
+	default:
+		if loadErr != nil {
+			return result, loadErr
+		}
+
+		result.LocalTokenFound = true
+	}
+
+	var remoteErr error
+	if options.RevokeRemote {
+		switch {
+		case !result.LocalTokenFound:
+			result.RemoteRevokeSkipped = true
+			if result.RemoteRevokeSkipReason == "" {
+				result.RemoteRevokeSkipReason = "no local GitHub token is stored"
+			}
+		case strings.TrimSpace(storedToken.AccessToken) == "":
+			result.RemoteRevokeSkipped = true
+			result.RemoteRevokeSkipReason = "no access token is stored locally"
+			remoteErr = fmt.Errorf("remote revoke requires a stored access token")
+		default:
+			clientID, err := s.initializer.GetValue("github.client_id")
+			if err != nil {
+				result.RemoteRevokeSkipped = true
+				result.RemoteRevokeSkipReason = "github.client_id is unavailable"
+				remoteErr = err
+			} else if strings.TrimSpace(clientID) == "" {
+				result.RemoteRevokeSkipped = true
+				result.RemoteRevokeSkipReason = "github.client_id is empty"
+				remoteErr = fmt.Errorf("config value github.client_id is empty")
+			} else {
+				clientSecret, present, err := loadGitHubClientSecret(s.initializer)
+				if err != nil {
+					result.RemoteRevokeSkipped = true
+					result.RemoteRevokeSkipReason = "GitHub client secret could not be loaded"
+					remoteErr = err
+				} else if !present {
+					result.RemoteRevokeSkipped = true
+					result.RemoteRevokeSkipReason = "GitHub client secret is not configured"
+					remoteErr = fmt.Errorf("remote revoke requires %s or github.client_secret", githubClientSecretEnv)
+				} else {
+					result.RemoteRevokeAttempted = true
+					remoteErr = s.revokeToken(ctx, baseConfig.APIBaseURL, strings.TrimSpace(clientID), clientSecret, strings.TrimSpace(storedToken.AccessToken))
+					result.RemoteRevokeSucceeded = remoteErr == nil
+				}
+			}
+		}
+	}
+
+	clearErr := s.invalidateStoredToken(baseConfig.Account)
+	if clearErr == nil {
+		result.LocalStateCleared = true
+	}
+
+	switch {
+	case clearErr != nil && remoteErr != nil:
+		return result, fmt.Errorf("local logout failed: %w; remote revoke failed: %v", clearErr, remoteErr)
+	case clearErr != nil:
+		return result, fmt.Errorf("local logout failed: %w", clearErr)
+	case remoteErr != nil:
+		return result, fmt.Errorf("local logout succeeded, but remote revoke failed: %w", remoteErr)
+	default:
+		return result, nil
+	}
 }
 
 func (s *GitHubAuthService) ensureDefaults() error {
@@ -287,6 +393,64 @@ func (s *GitHubAuthService) exchangeRefreshToken(
 	}
 
 	return tokenResponse, nil
+}
+
+func (s *GitHubAuthService) revokeToken(
+	ctx context.Context,
+	apiBaseURL string,
+	clientID string,
+	clientSecret string,
+	accessToken string,
+) error {
+	endpoint, err := githubAPIEndpoint(apiBaseURL, "/applications/"+clientID+"/token")
+	if err != nil {
+		return err
+	}
+
+	payload := struct {
+		AccessToken string `json:"access_token"`
+	}{
+		AccessToken: accessToken,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode revoke token request: %w", err)
+	}
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build revoke token request: %w", err)
+	}
+
+	request.SetBasicAuth(clientID, clientSecret)
+	request.Header.Set("Accept", githubRESTAcceptHeader)
+	request.Header.Set("Content-Type", "application/json")
+
+	response, err := s.httpClient.Do(request)
+	if err != nil {
+		return fmt.Errorf("revoke GitHub user token: send request: %w", err)
+	}
+	defer response.Body.Close()
+
+	responseBody, err := io.ReadAll(response.Body)
+	if err != nil {
+		return fmt.Errorf("revoke GitHub user token: read response body: %w", err)
+	}
+
+	if response.StatusCode == http.StatusNoContent {
+		return nil
+	}
+
+	message := strings.TrimSpace(string(responseBody))
+	if decoded := decodeGitHubAPIErrorMessage(responseBody); decoded != "" {
+		message = decoded
+	}
+	if message == "" {
+		message = response.Status
+	}
+
+	return fmt.Errorf("revoke GitHub user token: %s", message)
 }
 
 func (s *GitHubAuthService) invalidateStoredToken(account string) error {

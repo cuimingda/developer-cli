@@ -3,8 +3,10 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -404,6 +406,220 @@ func TestGitHubRefreshRunnerRunRefreshesTokenAndWritesExpirations(t *testing.T) 
 
 func TestGitHubRefreshCommandRequiresNoArgs(t *testing.T) {
 	cmd := newGitHubRefreshCmd(&GitHubRefreshRunner{})
+	cmd.SetArgs([]string{"unexpected"})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected Execute() to return an error")
+	}
+
+	if !strings.Contains(err.Error(), "unknown command") && !strings.Contains(err.Error(), "accepts 0 arg(s), received 1") {
+		t.Fatalf("unexpected error: %q", err.Error())
+	}
+}
+
+func TestGitHubAuthServiceLogoutClearsLocalTokenState(t *testing.T) {
+	initializer := newGitHubLoginTestInitializer(t)
+	now := time.Date(2026, time.March, 13, 12, 0, 0, 0, time.UTC)
+	stubStore := &stubGitHubTokenStore{
+		loadToken: GitHubStoredToken{
+			AccessToken:           "access-token",
+			RefreshToken:          "refresh-token",
+			AccessTokenExpiresAt:  timePointer(now.Add(8 * time.Hour)),
+			RefreshTokenExpiresAt: timePointer(now.Add(24 * time.Hour)),
+			Host:                  "github.com",
+		},
+	}
+	service := &GitHubAuthService{
+		initializer: initializer,
+		httpClient:  http.DefaultClient,
+		now: func() time.Time {
+			return now
+		},
+		tokenStore:    stubStore,
+		refreshLeeway: githubRefreshLeeway,
+	}
+
+	result, err := service.Logout(context.Background(), GitHubLogoutOptions{})
+	if err != nil {
+		t.Fatalf("Logout() returned error: %v", err)
+	}
+
+	if !result.LocalStateCleared {
+		t.Fatal("expected local state to be cleared")
+	}
+	if stubStore.deletedAccount != "github.com" {
+		t.Fatalf("deleted account = %q, want %q", stubStore.deletedAccount, "github.com")
+	}
+}
+
+func TestGitHubAuthServiceLogoutRevokesRemoteTokenAndClearsLocalState(t *testing.T) {
+	initializer := newGitHubLoginTestInitializer(t)
+	if err := initializer.SetValue("github.client_id", "client-123"); err != nil {
+		t.Fatalf("SetValue() returned error: %v", err)
+	}
+	t.Setenv(githubClientSecretEnv, "secret-123")
+
+	var revokeRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		revokeRequests++
+		if r.Method != http.MethodDelete {
+			t.Fatalf("request method = %q, want %q", r.Method, http.MethodDelete)
+		}
+		if r.URL.Path != "/api/v3/applications/client-123/token" {
+			t.Fatalf("request path = %q, want %q", r.URL.Path, "/api/v3/applications/client-123/token")
+		}
+		username, password, ok := r.BasicAuth()
+		if !ok {
+			t.Fatal("expected basic auth to be set")
+		}
+		if username != "client-123" || password != "secret-123" {
+			t.Fatalf("basic auth = %q/%q, want client-123/secret-123", username, password)
+		}
+		if got := r.Header.Get("Content-Type"); got != "application/json" {
+			t.Fatalf("Content-Type = %q, want %q", got, "application/json")
+		}
+
+		var body struct {
+			AccessToken string `json:"access_token"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("Decode() returned error: %v", err)
+		}
+		if body.AccessToken != "access-token" {
+			t.Fatalf("access_token = %q, want %q", body.AccessToken, "access-token")
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	if err := initializer.SetValue("github.api_base_url", server.URL+"/api/v3"); err != nil {
+		t.Fatalf("SetValue() returned error: %v", err)
+	}
+
+	now := time.Date(2026, time.March, 13, 12, 0, 0, 0, time.UTC)
+	stubStore := &stubGitHubTokenStore{
+		loadToken: GitHubStoredToken{
+			AccessToken:           "access-token",
+			RefreshToken:          "refresh-token",
+			AccessTokenExpiresAt:  timePointer(now.Add(8 * time.Hour)),
+			RefreshTokenExpiresAt: timePointer(now.Add(24 * time.Hour)),
+			Host:                  strings.TrimPrefix(server.URL, "http://"),
+		},
+	}
+	service := &GitHubAuthService{
+		initializer: initializer,
+		httpClient:  server.Client(),
+		now: func() time.Time {
+			return now
+		},
+		tokenStore:    stubStore,
+		refreshLeeway: githubRefreshLeeway,
+	}
+
+	result, err := service.Logout(context.Background(), GitHubLogoutOptions{RevokeRemote: true})
+	if err != nil {
+		t.Fatalf("Logout() returned error: %v", err)
+	}
+
+	if revokeRequests != 1 {
+		t.Fatalf("revoke request count = %d, want %d", revokeRequests, 1)
+	}
+	if !result.RemoteRevokeSucceeded {
+		t.Fatal("expected remote revoke to succeed")
+	}
+	if stubStore.deletedAccount != strings.TrimPrefix(server.URL, "http://") {
+		t.Fatalf("deleted account = %q, want host from %q", stubStore.deletedAccount, server.URL)
+	}
+}
+
+func TestGitHubAuthServiceLogoutClearsLocalStateWhenRemoteRevokeCannotRun(t *testing.T) {
+	initializer := newGitHubLoginTestInitializer(t)
+	if err := initializer.SetValue("github.client_id", "client-123"); err != nil {
+		t.Fatalf("SetValue() returned error: %v", err)
+	}
+
+	originalSecret, hadSecret := os.LookupEnv(githubClientSecretEnv)
+	if hadSecret {
+		t.Setenv(githubClientSecretEnv, originalSecret)
+	} else {
+		t.Setenv(githubClientSecretEnv, "")
+	}
+
+	now := time.Date(2026, time.March, 13, 12, 0, 0, 0, time.UTC)
+	stubStore := &stubGitHubTokenStore{
+		loadToken: GitHubStoredToken{
+			AccessToken:           "access-token",
+			RefreshToken:          "refresh-token",
+			AccessTokenExpiresAt:  timePointer(now.Add(8 * time.Hour)),
+			RefreshTokenExpiresAt: timePointer(now.Add(24 * time.Hour)),
+			Host:                  "github.com",
+		},
+	}
+	service := &GitHubAuthService{
+		initializer: initializer,
+		httpClient:  http.DefaultClient,
+		now: func() time.Time {
+			return now
+		},
+		tokenStore:    stubStore,
+		refreshLeeway: githubRefreshLeeway,
+	}
+
+	result, err := service.Logout(context.Background(), GitHubLogoutOptions{RevokeRemote: true})
+	if err == nil {
+		t.Fatal("expected Logout() to return an error")
+	}
+
+	if !result.LocalStateCleared {
+		t.Fatal("expected local state to be cleared")
+	}
+	if got := err.Error(); got != "local logout succeeded, but remote revoke failed: remote revoke requires GITHUB_CLIENT_SECRET or github.client_secret" {
+		t.Fatalf("error = %q, want %q", got, "local logout succeeded, but remote revoke failed: remote revoke requires GITHUB_CLIENT_SECRET or github.client_secret")
+	}
+}
+
+func TestGitHubLogoutRunnerRunReportsPartialSuccess(t *testing.T) {
+	initializer := newGitHubLoginTestInitializer(t)
+	if err := initializer.SetValue("github.client_id", "client-123"); err != nil {
+		t.Fatalf("SetValue() returned error: %v", err)
+	}
+
+	runner := &GitHubLogoutRunner{
+		service: &GitHubAuthService{
+			initializer: initializer,
+			httpClient:  http.DefaultClient,
+			now: func() time.Time {
+				return time.Date(2026, time.March, 13, 12, 0, 0, 0, time.UTC)
+			},
+			tokenStore: &stubGitHubTokenStore{
+				loadToken: GitHubStoredToken{
+					AccessToken: "access-token",
+					Host:        "github.com",
+				},
+			},
+			refreshLeeway: githubRefreshLeeway,
+		},
+	}
+
+	var output bytes.Buffer
+	err := runner.Run(context.Background(), &output, GitHubLogoutOptions{RevokeRemote: true})
+	if err == nil {
+		t.Fatal("expected Run() to return an error")
+	}
+
+	commandOutput := output.String()
+	if !strings.Contains(commandOutput, "GitHub logout completed. Local token state was cleared for github.com.") {
+		t.Fatalf("output = %q, want local logout success", commandOutput)
+	}
+	if !strings.Contains(commandOutput, "Remote token revoke was skipped: GitHub client secret is not configured.") {
+		t.Fatalf("output = %q, want skipped remote revoke message", commandOutput)
+	}
+}
+
+func TestGitHubLogoutCommandRequiresNoArgs(t *testing.T) {
+	cmd := newGitHubLogoutCmd(&GitHubLogoutRunner{})
 	cmd.SetArgs([]string{"unexpected"})
 
 	err := cmd.Execute()
