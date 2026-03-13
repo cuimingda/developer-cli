@@ -227,6 +227,12 @@ func TestGitHubAuthStatusRunnerEvaluateReturnsAuthorizationInvalidOn401(t *testi
 	if report.RemoteProbeStatusCode != http.StatusUnauthorized {
 		t.Fatalf("report.RemoteProbeStatusCode = %d, want %d", report.RemoteProbeStatusCode, http.StatusUnauthorized)
 	}
+	if runner.tokenStore.(*stubGitHubTokenStore).deletedAccount != strings.TrimPrefix(server.URL, "http://") && runner.tokenStore.(*stubGitHubTokenStore).deletedAccount != strings.TrimPrefix(server.URL, "https://") {
+		t.Fatalf("deleted account = %q, want host from %q", runner.tokenStore.(*stubGitHubTokenStore).deletedAccount, server.URL)
+	}
+	if report.AccessTokenPresent {
+		t.Fatal("expected access token to be cleared after unauthorized probe")
+	}
 }
 
 func TestGitHubAuthStatusRunnerEvaluateReturnsReauthenticationRequiredWhenRefreshTokenExpired(t *testing.T) {

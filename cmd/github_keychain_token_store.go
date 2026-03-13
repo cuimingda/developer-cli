@@ -15,10 +15,12 @@ const (
 )
 
 var ErrGitHubTokenNotFound = errors.New("github token not found")
+var ErrGitHubStoredTokenInvalid = errors.New("github stored token invalid")
 
 type GitHubTokenStore interface {
 	Save(account string, token GitHubStoredToken) error
 	Load(account string) (GitHubStoredToken, error)
+	Delete(account string) error
 }
 
 type KeychainGitHubTokenStore struct {
@@ -112,10 +114,39 @@ func (s *KeychainGitHubTokenStore) Load(account string) (GitHubStoredToken, erro
 
 	var token GitHubStoredToken
 	if err := json.Unmarshal([]byte(strings.TrimSpace(string(output))), &token); err != nil {
-		return GitHubStoredToken{}, fmt.Errorf("decode github token payload: %w", err)
+		return GitHubStoredToken{}, fmt.Errorf("%w: decode github token payload: %v", ErrGitHubStoredTokenInvalid, err)
 	}
 
 	return token, nil
+}
+
+func (s *KeychainGitHubTokenStore) Delete(account string) error {
+	if strings.TrimSpace(account) == "" {
+		return fmt.Errorf("keychain account is empty")
+	}
+	if s == nil || s.runCommand == nil {
+		return fmt.Errorf("keychain command runner is not configured")
+	}
+
+	output, err := s.runCommand(
+		"security",
+		"delete-generic-password",
+		"-a", account,
+		"-s", githubTokenKeychainService,
+	)
+	if err != nil {
+		message := strings.TrimSpace(string(output))
+		if isKeychainItemNotFound(message) {
+			return nil
+		}
+		if message == "" {
+			return fmt.Errorf("delete github token from keychain: %w", err)
+		}
+
+		return fmt.Errorf("delete github token from keychain: %w: %s", err, message)
+	}
+
+	return nil
 }
 
 func isKeychainItemNotFound(message string) bool {

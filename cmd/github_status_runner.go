@@ -238,6 +238,18 @@ func (r *GitHubAuthStatusRunner) Evaluate(ctx context.Context) (GitHubAuthStatus
 		report.State = GitHubAuthStateAuthorizationInvalid
 		report.Summary = "Logged in, but authorization is no longer valid."
 		report.NextAction = nextActionWithoutRefreshToken(report.ClientIDPresent)
+		if err := r.tokenStore.Delete(report.Host); err == nil {
+			report.Summary = "GitHub authorization is no longer valid. Local token state was cleared."
+			report.AccessTokenPresent = false
+			report.RefreshTokenPresent = false
+			report.AccessTokenExpired = false
+			report.AccessTokenNearExpiry = false
+			report.RefreshTokenExpired = false
+			report.AccessTokenExpiresAt = nil
+			report.RefreshTokenExpiresAt = nil
+		} else {
+			report.RemoteProbeMessage = appendStatusDetail(report.RemoteProbeMessage, "failed to clear local token state: "+err.Error())
+		}
 		report.AppInstallationState = GitHubAppInstallationUnknown
 		report.AppInstallationReason = "skipped because authorization is no longer valid"
 	default:
@@ -678,6 +690,20 @@ func remoteProbeDescription(report GitHubAuthStatusReport) string {
 			return report.RemoteProbeStatus
 		}
 		return "unavailable"
+	}
+}
+
+func appendStatusDetail(base string, detail string) string {
+	base = strings.TrimSpace(base)
+	detail = strings.TrimSpace(detail)
+
+	switch {
+	case base == "":
+		return detail
+	case detail == "":
+		return base
+	default:
+		return base + "; " + detail
 	}
 }
 

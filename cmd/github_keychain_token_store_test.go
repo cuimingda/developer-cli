@@ -133,3 +133,74 @@ func TestKeychainGitHubTokenStoreLoadReturnsNotFoundError(t *testing.T) {
 		t.Fatalf("Load() error = %v, want ErrGitHubTokenNotFound", err)
 	}
 }
+
+func TestKeychainGitHubTokenStoreLoadReturnsInvalidPayloadError(t *testing.T) {
+	store := &KeychainGitHubTokenStore{
+		runCommand: func(name string, args ...string) ([]byte, error) {
+			return []byte("{not-json"), nil
+		},
+	}
+
+	_, err := store.Load("github.com")
+	if !errors.Is(err, ErrGitHubStoredTokenInvalid) {
+		t.Fatalf("Load() error = %v, want ErrGitHubStoredTokenInvalid", err)
+	}
+}
+
+func TestKeychainGitHubTokenStoreDeleteRemovesStoredToken(t *testing.T) {
+	store := &KeychainGitHubTokenStore{}
+
+	var commandName string
+	var commandArgs []string
+	store.runCommand = func(name string, args ...string) ([]byte, error) {
+		commandName = name
+		commandArgs = append([]string(nil), args...)
+		return []byte("deleted"), nil
+	}
+
+	if err := store.Delete("github.com"); err != nil {
+		t.Fatalf("Delete() returned error: %v", err)
+	}
+
+	if commandName != "security" {
+		t.Fatalf("command name = %q, want %q", commandName, "security")
+	}
+
+	wantArgs := []string{
+		"delete-generic-password",
+		"-a", "github.com",
+		"-s", githubTokenKeychainService,
+	}
+	if !reflect.DeepEqual(commandArgs, wantArgs) {
+		t.Fatalf("command args = %#v, want %#v", commandArgs, wantArgs)
+	}
+}
+
+func TestKeychainGitHubTokenStoreDeleteIgnoresMissingToken(t *testing.T) {
+	store := &KeychainGitHubTokenStore{
+		runCommand: func(name string, args ...string) ([]byte, error) {
+			return []byte("security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain."), errors.New("exit status 44")
+		},
+	}
+
+	if err := store.Delete("github.com"); err != nil {
+		t.Fatalf("Delete() returned error: %v", err)
+	}
+}
+
+func TestKeychainGitHubTokenStoreDeleteIncludesSecurityOutputOnFailure(t *testing.T) {
+	store := &KeychainGitHubTokenStore{
+		runCommand: func(name string, args ...string) ([]byte, error) {
+			return []byte("user interaction is not allowed"), errors.New("exit status 36")
+		},
+	}
+
+	err := store.Delete("github.com")
+	if err == nil {
+		t.Fatal("expected Delete() to return an error")
+	}
+
+	if got := err.Error(); got != "delete github token from keychain: exit status 36: user interaction is not allowed" {
+		t.Fatalf("error = %q, want %q", got, "delete github token from keychain: exit status 36: user interaction is not allowed")
+	}
+}
