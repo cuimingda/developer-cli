@@ -38,6 +38,7 @@ to quickly create a Cobra application.`,
 	workspaceLister := newDefaultWorkspaceLister(initializer)
 	cmd.AddCommand(newConfigCmd(initializer))
 	cmd.AddCommand(newGitHubCmd(initializer, nil))
+	cmd.AddCommand(newRepoCmd(initializer))
 	cmd.AddCommand(newTimezoneCmd(nil))
 	cmd.AddCommand(newWorkspaceCmd(initializer))
 	cmd.AddCommand(newLSCmd(workspaceLister))

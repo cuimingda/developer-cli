@@ -37,9 +37,9 @@ func TestWorkspaceListerListReturnsDirectoriesAndRemotePaths(t *testing.T) {
 	}
 
 	want := []WorkspaceEntry{
-		{LocalName: "alpha", RemotePath: "github.com/openai/alpha"},
-		{LocalName: "beta", RemotePath: "github.com/openai/beta"},
-		{LocalName: "gamma", RemotePath: redNoRemote},
+		{LocalName: "alpha", RemotePath: "github.com/openai/alpha", HasRemote: true},
+		{LocalName: "beta", RemotePath: "github.com/openai/beta", HasRemote: true},
+		{LocalName: "gamma", RemotePath: "", HasRemote: false},
 	}
 	if !reflect.DeepEqual(entries, want) {
 		t.Fatalf("List() = %#v, want %#v", entries, want)

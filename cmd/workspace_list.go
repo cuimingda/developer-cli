@@ -29,7 +29,12 @@ func runWorkspaceList(cmd *cobra.Command, lister *WorkspaceLister) error {
 	}
 
 	for _, entry := range entries {
-		if _, err := fmt.Fprintf(cmd.OutOrStdout(), "%s - %s\n", entry.LocalName, entry.RemotePath); err != nil {
+		displayRemotePath := entry.RemotePath
+		if !entry.HasRemote {
+			displayRemotePath = redNoRemote
+		}
+
+		if _, err := fmt.Fprintf(cmd.OutOrStdout(), "%s - %s\n", entry.LocalName, displayRemotePath); err != nil {
 			return err
 		}
 	}

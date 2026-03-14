@@ -16,6 +16,7 @@ const redNoRemote = "\x1b[31m<no remote>\x1b[0m"
 type WorkspaceEntry struct {
 	LocalName  string
 	RemotePath string
+	HasRemote  bool
 }
 
 type WorkspaceLister struct {
@@ -38,6 +39,10 @@ func (w *WorkspaceLister) List() ([]WorkspaceEntry, error) {
 		return nil, err
 	}
 
+	return listWorkspaceEntriesInRoot(workspaceRoot)
+}
+
+func listWorkspaceEntriesInRoot(workspaceRoot string) ([]WorkspaceEntry, error) {
 	entries, err := os.ReadDir(workspaceRoot)
 	if err != nil {
 		return nil, fmt.Errorf("read workspace directory: %w", err)
@@ -49,7 +54,7 @@ func (w *WorkspaceLister) List() ([]WorkspaceEntry, error) {
 			continue
 		}
 
-		remotePath, err := workspaceRemotePath(filepath.Join(workspaceRoot, entry.Name()))
+		remotePath, hasRemote, err := workspaceRemotePath(filepath.Join(workspaceRoot, entry.Name()))
 		if err != nil {
 			return nil, err
 		}
@@ -57,6 +62,7 @@ func (w *WorkspaceLister) List() ([]WorkspaceEntry, error) {
 		workspaces = append(workspaces, WorkspaceEntry{
 			LocalName:  entry.Name(),
 			RemotePath: remotePath,
+			HasRemote:  hasRemote,
 		})
 	}
 
@@ -67,26 +73,26 @@ func (w *WorkspaceLister) List() ([]WorkspaceEntry, error) {
 	return workspaces, nil
 }
 
-func workspaceRemotePath(projectPath string) (string, error) {
+func workspaceRemotePath(projectPath string) (string, bool, error) {
 	configPath, err := gitConfigPath(projectPath)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if configPath == "" {
-		return redNoRemote, nil
+		return "", false, nil
 	}
 
 	remoteURLs, err := readGitRemoteURLs(configPath)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 
 	remoteURL, ok := chooseGitRemoteURL(remoteURLs)
 	if !ok {
-		return redNoRemote, nil
+		return "", false, nil
 	}
 
-	return normalizeGitHubRemotePath(remoteURL), nil
+	return normalizeGitHubRemotePath(remoteURL), true, nil
 }
 
 func gitConfigPath(projectPath string) (string, error) {
