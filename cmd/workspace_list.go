@@ -17,18 +17,22 @@ func newWorkspaceListCmd(lister *WorkspaceLister) *cobra.Command {
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			entries, err := lister.List()
-			if err != nil {
-				return err
-			}
-
-			for _, entry := range entries {
-				if _, err := fmt.Fprintf(cmd.OutOrStdout(), "%s - %s\n", entry.LocalName, entry.RemotePath); err != nil {
-					return err
-				}
-			}
-
-			return nil
+			return runWorkspaceList(cmd, lister)
 		},
 	}
+}
+
+func runWorkspaceList(cmd *cobra.Command, lister *WorkspaceLister) error {
+	entries, err := lister.List()
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		if _, err := fmt.Fprintf(cmd.OutOrStdout(), "%s - %s\n", entry.LocalName, entry.RemotePath); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
