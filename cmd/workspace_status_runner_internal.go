@@ -52,7 +52,7 @@ func gitWorkingTreeClean(projectPath string, runGit workspaceGitCommandRunner) b
 }
 
 func gitBranchSynchronized(projectPath string, runGit workspaceGitCommandRunner) bool {
-	if _, err := runGit(projectPath, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"); err != nil {
+	if !gitCurrentUpstreamConfigured(projectPath, runGit) {
 		return false
 	}
 
@@ -63,6 +63,14 @@ func gitBranchSynchronized(projectPath string, runGit workspaceGitCommandRunner)
 
 	behind, ahead, ok := parseGitRevisionCounts(string(output))
 	return ok && behind == 0 && ahead == 0
+}
+
+func gitCurrentUpstreamConfigured(projectPath string, runGit workspaceGitCommandRunner) bool {
+	if _, err := runGit(projectPath, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"); err != nil {
+		return false
+	}
+
+	return true
 }
 
 func parseGitRevisionCounts(output string) (behind int, ahead int, ok bool) {

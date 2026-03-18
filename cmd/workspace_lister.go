@@ -181,8 +181,17 @@ func parseGitRemoteSection(sectionLine string) string {
 }
 
 func chooseGitRemoteURL(remoteURLs map[string]string) (string, bool) {
+	remoteName, ok := chooseGitRemoteName(remoteURLs)
+	if !ok {
+		return "", false
+	}
+
+	return strings.TrimSpace(remoteURLs[remoteName]), true
+}
+
+func chooseGitRemoteName(remoteURLs map[string]string) (string, bool) {
 	if remoteURL := strings.TrimSpace(remoteURLs["origin"]); remoteURL != "" {
-		return remoteURL, true
+		return "origin", true
 	}
 
 	remoteNames := make([]string, 0, len(remoteURLs))
@@ -193,7 +202,7 @@ func chooseGitRemoteURL(remoteURLs map[string]string) (string, bool) {
 
 	for _, name := range remoteNames {
 		if remoteURL := strings.TrimSpace(remoteURLs[name]); remoteURL != "" {
-			return remoteURL, true
+			return name, true
 		}
 	}
 
