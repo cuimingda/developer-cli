@@ -9,6 +9,7 @@ func newWorkspaceCmd(initializer *ConfigInitializer) *cobra.Command {
 
 	workspaceInitializer := newDefaultWorkspaceInitializer(initializer)
 	workspaceLister := newDefaultWorkspaceLister(initializer)
+	workspaceStatusRunner := newDefaultWorkspaceStatusRunner(initializer)
 
 	cmd := &cobra.Command{
 		Use:   "workspace",
@@ -21,6 +22,7 @@ func newWorkspaceCmd(initializer *ConfigInitializer) *cobra.Command {
 
 	cmd.AddCommand(newWorkspaceInitCmd(workspaceInitializer))
 	cmd.AddCommand(newWorkspaceListCmd(workspaceLister))
+	cmd.AddCommand(newWorkspaceStatusCmd(workspaceStatusRunner))
 
 	return cmd
 }
